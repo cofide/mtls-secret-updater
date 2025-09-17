@@ -1,0 +1,44 @@
+version: 2
+project_name: mtls-secret-updater
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: mtls-secret-updater
+    binary: mtls-secret-updater
+    main: ./cmd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}}
+
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Tag }}_checksums.txt'
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - 'Merge pull request'
+      - 'Merge branch'
+
+kos:
+  - repositories: 
+    - ghcr.io/cofide/mtls-secret-updater
+    tags:
+      - "{{.Tag}}"
+      - latest
+    bare: true
+    preserve_import_paths: false
+    platforms:
+      - linux/amd64
+      - linux/arm64

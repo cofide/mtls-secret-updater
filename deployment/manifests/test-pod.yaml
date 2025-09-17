@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: example-secret
+  namespace: connect
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mtls-secret-updater
+  namespace: connect
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mtls-secret-updater
+  namespace: connect
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mtls-secret-updater
+  namespace: connect
+subjects:
+- kind: ServiceAccount
+  name: mtls-secret-updater
+roleRef:
+  kind: Role
+  name: mtls-secret-updater
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mtls-secret-updater-spiffe-helper
+  namespace: connect
+data:
+  helper.conf: |
+    svid_file_name = "tls.crt"
+    svid_key_file_name = "tls.key"
+    svid_bundle_file_name = "ca.crt"
+    cert_dir = "/certs"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mtls-secret-updater
+  namespace: connect
+spec:
+  securityContext:
+    runAsUser: 1000
+  serviceAccountName: mtls-secret-updater
+  containers:
+  - name: mtls-secret-updater
+    image: ghcr.io/cofide/mtls-secret-updater:latest
+    imagePullPolicy: Never
+    env:
+      - name: SECRET_NAME
+        value: example-secret
+      - name: SECRET_NAMESPACE
+        value: connect
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "100m"
+      limits:
+        memory: "64Mi"
+        cpu: "100m"
+    volumeMounts:
+      - name: certs
+        mountPath: /certs
+  initContainers:
+    - name: spiffe-helper
+      restartPolicy: Always
+      image: ghcr.io/spiffe/spiffe-helper:0.10.1
+      args: ["-config", "config/helper.conf"]
+      volumeMounts:
+        - name: spire-agent-socket
+          mountPath: /tmp/spire-agent/public/
+          readOnly: true
+        - name: helper-config
+          mountPath: /config
+          readOnly: true
+        - name: certs
+          mountPath: /certs
+  volumes:
+    - name: spire-agent-socket
+      csi:
+        driver: "csi.spiffe.io"
+        readOnly: true
+    - name: helper-config
+      configMap:
+        name: mtls-secret-updater-spiffe-helper
+    - name: certs
+      emptyDir: {}
