@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"os/signal"
 	"slices"
+	"syscall"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -40,6 +42,10 @@ func tryPatchSecret(ctx context.Context, secretInterface v1.SecretInterface, nam
 
 func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secretName string) {
 	log.Println("Patching secret")
+
+	if ctx.Err() != nil {
+		return
+	}
 
 	// Read the certificate files
 	ca_crt, err := os.ReadFile("/certs/ca.crt")
@@ -78,15 +84,11 @@ func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secret
 		if err == nil {
 			break
 		}
-		log.Printf("Error patching secret: %v\n", err)
-		// try again only until ctx is cancelled
-		if ctx.Err() != nil {
-			log.Println("Context cancelled, stopping patch attempts")
-			return
-		}
+
+		log.Printf("Error patching secret: %v. Retrying...", err)
+
 		select {
 		case <-time.After(5 * time.Second):
-			log.Println("Retrying to patch secret...")
 			continue
 		case <-ctx.Done():
 			log.Println("Context cancelled, stopping patch attempts")
@@ -98,6 +100,9 @@ func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secret
 }
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		log.Fatal(err)
@@ -121,9 +126,7 @@ func main() {
 	secretInterface := clientset.CoreV1().Secrets(secretNamespace)
 
 	// Set a watch for file changes
-
 	log.Println("Setting up /certs watch")
-
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -135,10 +138,8 @@ func main() {
 		log.Fatal(err)
 	}
 
-	var ctx context.Context
-	var cancel context.CancelFunc
-
-	// Initial patch on startup
+	var patchCtx context.Context
+	var patchCancel context.CancelFunc
 
 	// Check if files exist
 	filesExist := true
@@ -148,12 +149,13 @@ func main() {
 			break
 		}
 	}
+
 	if filesExist {
 		log.Println("All files exist, patching secret")
-		ctx, cancel = context.WithCancel(context.Background())
-		go func(ctx context.Context) {
-			patchSecret(ctx, secretInterface, secretName)
-		}(ctx)
+		patchCtx, patchCancel = context.WithCancel(ctx)
+		go func() {
+			patchSecret(patchCtx, secretInterface, secretName)
+		}()
 	} else {
 		log.Println("Not all files exist, skipping the initial patch")
 	}
@@ -162,38 +164,39 @@ func main() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			log.Println("Received shutdown signal, exiting...")
+			if patchCancel != nil {
+				patchCancel()
+			}
+			return // Graceful exit
 		case event, ok := <-watcher.Events:
 			if !ok {
-				log.Fatalln("Watcher closed")
+				return
 			}
 			if event.Has(fsnotify.Write) && slices.Contains(FILES_TO_WATCH[:], event.Name) {
 				log.Printf("Detected change in %s\n", event.Name)
-				// Cancel any ongoing patch operation
-				if cancel != nil {
-					cancel()
+				if patchCancel != nil {
+					patchCancel()
 				}
-				ctx, cancel = context.WithCancel(context.Background())
-				go func(ctx context.Context) {
-					// Sleep to debounce rapid changes
-					// NOTE: this is *not only* because of 3 files being updated
-					// but also because it so happens that there are:
-					// (1) at filesystem level - multiple writes for the same file in the same update
-					// (2) at spiffe-helper level - multiple updates for the same SVID generation
-					// it all happens seemingly in a 30ms window
-					// so we wait a bit more to be sure everything is settled
-					// before we read the files
-					time.Sleep(100 * time.Millisecond)
-					if ctx.Err() != nil {
+				// Create new context for this specific patch attempt, linked to main shutdown ctx
+				patchCtx, patchCancel = context.WithCancel(ctx)
+
+				go func(c context.Context) {
+					// Sleep with context awareness
+					select {
+					case <-time.After(100 * time.Millisecond):
+					case <-c.Done():
 						return
 					}
-					patchSecret(ctx, secretInterface, secretName)
-				}(ctx)
+					patchSecret(c, secretInterface, secretName)
+				}(patchCtx)
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
-				log.Fatalln("Watcher closed")
+				return
 			}
-			log.Fatalln("Watcher error:", err)
+			log.Println("Watcher error:", err)
 		}
 	}
 }
