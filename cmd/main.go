@@ -196,7 +196,7 @@ func main() {
 			if !ok {
 				return
 			}
-			log.Println("Watcher error:", err)
+			log.Fatalln("Watcher error:", err)
 		}
 	}
 }
