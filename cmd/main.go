@@ -41,11 +41,11 @@ func tryPatchSecret(ctx context.Context, secretInterface v1.SecretInterface, nam
 }
 
 func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secretName string) {
-	log.Println("Patching secret")
-
 	if ctx.Err() != nil {
 		return
 	}
+
+	log.Println("Patching secret")
 
 	// Read the certificate files
 	ca_crt, err := os.ReadFile("/certs/ca.crt")
@@ -85,7 +85,7 @@ func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secret
 			break
 		}
 
-		log.Printf("Error patching secret: %v. Retrying...", err)
+		log.Printf("Error patching secret: %v. Will retry in 5s\n", err)
 
 		select {
 		case <-time.After(5 * time.Second):
@@ -100,6 +100,8 @@ func patchSecret(ctx context.Context, secretInterface v1.SecretInterface, secret
 }
 
 func main() {
+	// Process setup
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -126,7 +128,9 @@ func main() {
 	secretInterface := clientset.CoreV1().Secrets(secretNamespace)
 
 	// Set a watch for file changes
+
 	log.Println("Setting up /certs watch")
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Fatal(err)
@@ -137,6 +141,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Initial patch on startup
 
 	var patchCtx context.Context
 	var patchCancel context.CancelFunc
@@ -153,9 +159,9 @@ func main() {
 	if filesExist {
 		log.Println("All files exist, patching secret")
 		patchCtx, patchCancel = context.WithCancel(ctx)
-		go func() {
-			patchSecret(patchCtx, secretInterface, secretName)
-		}()
+		go func(ctx context.Context) {
+			patchSecret(ctx, secretInterface, secretName)
+		}(patchCtx)
 	} else {
 		log.Println("Not all files exist, skipping the initial patch")
 	}
@@ -176,20 +182,29 @@ func main() {
 			}
 			if event.Has(fsnotify.Write) && slices.Contains(FILES_TO_WATCH[:], event.Name) {
 				log.Printf("Detected change in %s\n", event.Name)
+				// Cancel any ongoing patch operation
 				if patchCancel != nil {
 					patchCancel()
 				}
 				// Create new context for this specific patch attempt, linked to main shutdown ctx
 				patchCtx, patchCancel = context.WithCancel(ctx)
 
-				go func(c context.Context) {
+				go func(ctx context.Context) {
+					// Sleep to debounce rapid changes
+					// NOTE: this is *not only* because of 3 files being updated
+					// but also because it so happens that there are:
+					// (1) at filesystem level - multiple writes for the same file in the same update
+					// (2) at spiffe-helper level - multiple updates for the same SVID generation
+					// it all happens seemingly in a 30ms window
+					// so we wait a bit more to be sure everything is settled
+					// before we read the files
 					// Sleep with context awareness
 					select {
 					case <-time.After(100 * time.Millisecond):
-					case <-c.Done():
+					case <-ctx.Done():
 						return
 					}
-					patchSecret(c, secretInterface, secretName)
+					patchSecret(ctx, secretInterface, secretName)
 				}(patchCtx)
 			}
 		case err, ok := <-watcher.Errors:
