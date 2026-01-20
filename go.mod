@@ -1,6 +1,6 @@
 module github.com/cofide/mtls-secret-updater
 
-go 1.24.0
+go 1.25
 
 require (
 	github.com/fsnotify/fsnotify v1.9.0

@@ -1,4 +1,4 @@
-FROM golang:1.24 AS build
+FROM golang:1.25 AS build
 
 WORKDIR /build
 
@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/gomod-cache go mod download
 COPY cmd cmd
 
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
-    CGO_ENABLED=0 go build -o ./mtls-secret-updater cmd/main.go
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o ./mtls-secret-updater cmd/main.go
 
 ##################################################
 
